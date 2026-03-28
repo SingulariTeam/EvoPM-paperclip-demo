@@ -17,6 +17,15 @@ describe("inferOpenAiCompatibleBiller", () => {
     ).toBe("openrouter");
   });
 
+  it("trims env values before detecting OpenRouter base URLs", () => {
+    expect(
+      inferOpenAiCompatibleBiller(
+        { OPENAI_API_BASE_URL: "  https://openrouter.ai/api/v1  " } as NodeJS.ProcessEnv,
+        "openai",
+      ),
+    ).toBe("openrouter");
+  });
+
   it("returns fallback when no OpenRouter markers are present", () => {
     expect(
       inferOpenAiCompatibleBiller(
