@@ -32,6 +32,16 @@ const baseAgent = {
   updatedAt: new Date("2026-03-19T00:00:00.000Z"),
 };
 
+function makeAgent(
+  overrides: Partial<typeof baseAgent> = {},
+): typeof baseAgent {
+  return {
+    ...baseAgent,
+    ...overrides,
+    permissions: overrides.permissions ?? baseAgent.permissions,
+  };
+}
+
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
   create: vi.fn(),
@@ -133,11 +143,13 @@ function createApp(actor: Record<string, unknown>) {
 describe("agent permission routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockAgentService.getById.mockResolvedValue(baseAgent);
+    mockAgentService.getById.mockImplementation(async (id: string) => makeAgent({ id }));
     mockAgentService.getChainOfCommand.mockResolvedValue([]);
     mockAgentService.resolveByReference.mockResolvedValue({ ambiguous: false, agent: baseAgent });
     mockAgentService.create.mockResolvedValue(baseAgent);
     mockAgentService.updatePermissions.mockResolvedValue(baseAgent);
+    mockAccessService.canUser.mockResolvedValue(false);
+    mockAccessService.hasPermission.mockResolvedValue(false);
     mockAccessService.getMembership.mockResolvedValue({
       id: "membership-1",
       companyId,
@@ -271,5 +283,135 @@ describe("agent permission routes", () => {
     );
     expect(res.body.access.canAssignTasks).toBe(true);
     expect(res.body.access.taskAssignSource).toBe("agent_creator");
+  });
+
+  it("allows CEO agents to manage permissions", async () => {
+    const ceoAgentId = "33333333-3333-4333-8333-333333333333";
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === ceoAgentId) {
+        return makeAgent({
+          id,
+          role: "ceo",
+          permissions: { canCreateAgents: false },
+        });
+      }
+      return makeAgent({ id });
+    });
+
+    const app = createApp({
+      type: "agent",
+      agentId: ceoAgentId,
+      companyId,
+      source: "agent_key",
+    });
+
+    const res = await request(app)
+      .patch(`/api/agents/${agentId}/permissions`)
+      .send({ canCreateAgents: true, canAssignTasks: true });
+
+    expect(res.status).toBe(200);
+    expect(mockAgentService.updatePermissions).toHaveBeenCalledWith(agentId, {
+      canCreateAgents: true,
+      canAssignTasks: true,
+    });
+  });
+
+  it("allows agent creators to manage permissions", async () => {
+    const creatorAgentId = "44444444-4444-4444-8444-444444444444";
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === creatorAgentId) {
+        return makeAgent({
+          id,
+          permissions: { canCreateAgents: true },
+        });
+      }
+      return makeAgent({ id });
+    });
+
+    const app = createApp({
+      type: "agent",
+      agentId: creatorAgentId,
+      companyId,
+      source: "agent_key",
+    });
+
+    const res = await request(app)
+      .patch(`/api/agents/${agentId}/permissions`)
+      .send({ canCreateAgents: true, canAssignTasks: true });
+
+    expect(res.status).toBe(200);
+    expect(mockAccessService.hasPermission).toHaveBeenCalledWith(
+      companyId,
+      "agent",
+      creatorAgentId,
+      "agents:create",
+    );
+  });
+
+  it("allows agents with explicit agents:create grants to manage permissions", async () => {
+    const grantedAgentId = "55555555-5555-4555-8555-555555555555";
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === grantedAgentId) {
+        return makeAgent({
+          id,
+          permissions: { canCreateAgents: false },
+        });
+      }
+      return makeAgent({ id });
+    });
+    mockAccessService.hasPermission.mockImplementation(
+      async (requestedCompanyId: string, principalType: string, principalId: string, permissionKey: string) =>
+        requestedCompanyId === companyId
+        && principalType === "agent"
+        && principalId === grantedAgentId
+        && permissionKey === "agents:create",
+    );
+
+    const app = createApp({
+      type: "agent",
+      agentId: grantedAgentId,
+      companyId,
+      source: "agent_key",
+    });
+
+    const res = await request(app)
+      .patch(`/api/agents/${agentId}/permissions`)
+      .send({ canCreateAgents: false, canAssignTasks: true });
+
+    expect(res.status).toBe(200);
+    expect(mockAccessService.hasPermission).toHaveBeenCalledWith(
+      companyId,
+      "agent",
+      grantedAgentId,
+      "agents:create",
+    );
+  });
+
+  it("rejects agents without team structure privileges", async () => {
+    const actorAgentId = "66666666-6666-4666-8666-666666666666";
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === actorAgentId) {
+        return makeAgent({
+          id,
+          permissions: { canCreateAgents: false },
+        });
+      }
+      return makeAgent({ id });
+    });
+
+    const app = createApp({
+      type: "agent",
+      agentId: actorAgentId,
+      companyId,
+      source: "agent_key",
+    });
+
+    const res = await request(app)
+      .patch(`/api/agents/${agentId}/permissions`)
+      .send({ canCreateAgents: true, canAssignTasks: true });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("team structure management");
+    expect(mockAgentService.updatePermissions).not.toHaveBeenCalled();
   });
 });

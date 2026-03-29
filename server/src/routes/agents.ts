@@ -241,6 +241,30 @@ export function agentRoutes(db: Db) {
     throw forbidden("Only CEO or agent creators can modify other agents");
   }
 
+  async function assertCanManageTeamStructureForCompany(req: Request, companyId: string) {
+    assertCompanyAccess(req, companyId);
+    if (req.actor.type === "board") return null;
+    if (!req.actor.agentId) throw forbidden("Agent authentication required");
+
+    const actorAgent = await svc.getById(req.actor.agentId);
+    if (!actorAgent || actorAgent.companyId !== companyId) {
+      throw forbidden("Agent key cannot access another company");
+    }
+
+    if (actorAgent.role === "ceo") return actorAgent;
+
+    const allowedByGrant = await access.hasPermission(companyId, "agent", actorAgent.id, "agents:create");
+    if (allowedByGrant || canCreateAgents(actorAgent)) {
+      return actorAgent;
+    }
+
+    throw forbidden("Missing permission: team structure management");
+  }
+
+  async function assertCanManageTeamStructure(req: Request, targetAgent: { companyId: string }) {
+    return assertCanManageTeamStructureForCompany(req, targetAgent.companyId);
+  }
+
   async function assertCanReadAgent(req: Request, targetAgent: { companyId: string }) {
     assertCompanyAccess(req, targetAgent.companyId);
     if (req.actor.type === "board") return;
@@ -1398,19 +1422,7 @@ export function agentRoutes(db: Db) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
-
-    if (req.actor.type === "agent") {
-      const actorAgent = req.actor.agentId ? await svc.getById(req.actor.agentId) : null;
-      if (!actorAgent || actorAgent.companyId !== existing.companyId) {
-        res.status(403).json({ error: "Forbidden" });
-        return;
-      }
-      if (actorAgent.role !== "ceo") {
-        res.status(403).json({ error: "Only CEO can manage permissions" });
-        return;
-      }
-    }
+    await assertCanManageTeamStructure(req, existing);
 
     const agent = await svc.updatePermissions(id, req.body);
     if (!agent) {
