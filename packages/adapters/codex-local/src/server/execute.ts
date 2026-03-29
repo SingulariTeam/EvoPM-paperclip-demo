@@ -68,6 +68,46 @@ function resolveCodexBiller(env: Record<string, string>, billingType: "api" | "s
   return billingType === "subscription" ? "chatgpt" : openAiCompatibleBiller ?? "openai";
 }
 
+function bundledCodexRelativePath(): string | null {
+  if (process.platform === "darwin") {
+    return process.arch === "arm64" ? "bin/macos-aarch64/codex" : "bin/macos-x64/codex";
+  }
+  if (process.platform === "linux") {
+    return process.arch === "arm64" ? "bin/linux-arm64/codex" : "bin/linux-x64/codex";
+  }
+  if (process.platform === "win32") {
+    return process.arch === "arm64" ? "bin/windows-arm64/codex.exe" : "bin/windows-x64/codex.exe";
+  }
+  return null;
+}
+
+async function resolveBundledCodexCommand(): Promise<string | null> {
+  const homeDir = process.env.HOME?.trim();
+  const relativePath = bundledCodexRelativePath();
+  if (!homeDir || !relativePath) return null;
+
+  const extensionRoots = [
+    path.join(homeDir, ".vscode", "extensions"),
+    path.join(homeDir, ".vscode-insiders", "extensions"),
+  ];
+
+  for (const root of extensionRoots) {
+    const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+    const matchingDirs = entries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith("openai.chatgpt-"))
+      .map((entry) => entry.name)
+      .sort()
+      .reverse();
+
+    for (const dirName of matchingDirs) {
+      const candidate = path.join(root, dirName, relativePath);
+      if (await pathExists(candidate)) return candidate;
+    }
+  }
+
+  return null;
+}
+
 async function isLikelyPaperclipRepoRoot(candidate: string): Promise<boolean> {
   const [hasWorkspace, hasPackageJson, hasServerDir, hasAdapterUtilsDir] = await Promise.all([
     pathExists(path.join(candidate, "pnpm-workspace.yaml")),
@@ -218,7 +258,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     config.promptTemplate,
     "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work.",
   );
-  const command = asString(config.command, "codex");
+  let command = asString(config.command, "codex");
   const model = asString(config.model, "");
   const modelReasoningEffort = asString(
     config.modelReasoningEffort,
@@ -382,6 +422,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const billingType = resolveCodexBillingType(effectiveEnv);
   const runtimeEnv = ensurePathInEnv(effectiveEnv);
+  if (command === "codex") {
+    const bundledCodex = await resolveBundledCodexCommand();
+    if (bundledCodex) {
+      command = bundledCodex;
+      await onLog(
+        "stdout",
+        `[paperclip] Resolved default codex command to bundled executable "${bundledCodex}".\n`,
+      );
+    }
+  }
   await ensureCommandResolvable(command, cwd, runtimeEnv);
 
   const timeoutSec = asNumber(config.timeoutSec, 0);
