@@ -45,6 +45,10 @@ function makeAgent(
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
   create: vi.fn(),
+  pause: vi.fn(),
+  resume: vi.fn(),
+  terminate: vi.fn(),
+  remove: vi.fn(),
   updatePermissions: vi.fn(),
   getChainOfCommand: vi.fn(),
   resolveByReference: vi.fn(),
@@ -71,6 +75,7 @@ const mockBudgetService = vi.hoisted(() => ({
 const mockHeartbeatService = vi.hoisted(() => ({
   listTaskSessions: vi.fn(),
   resetRuntimeSession: vi.fn(),
+  cancelActiveForAgent: vi.fn(),
 }));
 
 const mockIssueApprovalService = vi.hoisted(() => ({
@@ -147,6 +152,23 @@ describe("agent permission routes", () => {
     mockAgentService.getChainOfCommand.mockResolvedValue([]);
     mockAgentService.resolveByReference.mockResolvedValue({ ambiguous: false, agent: baseAgent });
     mockAgentService.create.mockResolvedValue(baseAgent);
+    mockAgentService.pause.mockResolvedValue({
+      ...baseAgent,
+      status: "paused",
+      pauseReason: "manual",
+      pausedAt: new Date("2026-03-19T01:00:00.000Z"),
+    });
+    mockAgentService.resume.mockResolvedValue({
+      ...baseAgent,
+      status: "idle",
+      pauseReason: null,
+      pausedAt: null,
+    });
+    mockAgentService.terminate.mockResolvedValue({
+      ...baseAgent,
+      status: "terminated",
+    });
+    mockAgentService.remove.mockResolvedValue(baseAgent);
     mockAgentService.updatePermissions.mockResolvedValue(baseAgent);
     mockAccessService.canUser.mockResolvedValue(false);
     mockAccessService.hasPermission.mockResolvedValue(false);
@@ -163,6 +185,7 @@ describe("agent permission routes", () => {
     mockAccessService.listPrincipalGrants.mockResolvedValue([]);
     mockAccessService.ensureMembership.mockResolvedValue(undefined);
     mockAccessService.setPrincipalPermission.mockResolvedValue(undefined);
+    mockHeartbeatService.cancelActiveForAgent.mockResolvedValue(undefined);
     mockCompanySkillService.listRuntimeSkillEntries.mockResolvedValue([]);
     mockCompanySkillService.resolveRequestedSkillKeys.mockImplementation(async (_companyId, requested) => requested);
     mockBudgetService.upsertPolicy.mockResolvedValue(undefined);
@@ -413,5 +436,104 @@ describe("agent permission routes", () => {
     expect(res.status).toBe(403);
     expect(res.body.error).toContain("team structure management");
     expect(mockAgentService.updatePermissions).not.toHaveBeenCalled();
+  });
+
+  it("allows agent creators to pause, resume, terminate, and delete agents", async () => {
+    const creatorAgentId = "77777777-7777-4777-8777-777777777777";
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === creatorAgentId) {
+        return makeAgent({
+          id,
+          permissions: { canCreateAgents: true },
+        });
+      }
+      return makeAgent({ id });
+    });
+
+    const app = createApp({
+      type: "agent",
+      agentId: creatorAgentId,
+      companyId,
+      source: "agent_key",
+    });
+
+    const pauseRes = await request(app).post(`/api/agents/${agentId}/pause`);
+    const resumeRes = await request(app).post(`/api/agents/${agentId}/resume`);
+    const terminateRes = await request(app).post(`/api/agents/${agentId}/terminate`);
+    const deleteRes = await request(app).delete(`/api/agents/${agentId}`);
+
+    expect(pauseRes.status).toBe(200);
+    expect(resumeRes.status).toBe(200);
+    expect(terminateRes.status).toBe(200);
+    expect(deleteRes.status).toBe(200);
+    expect(mockAgentService.pause).toHaveBeenCalledWith(agentId);
+    expect(mockAgentService.resume).toHaveBeenCalledWith(agentId);
+    expect(mockAgentService.terminate).toHaveBeenCalledWith(agentId);
+    expect(mockAgentService.remove).toHaveBeenCalledWith(agentId);
+    expect(mockHeartbeatService.cancelActiveForAgent).toHaveBeenCalledWith(agentId);
+  });
+
+  it("allows agents with explicit grants to execute lifecycle routes", async () => {
+    const grantedAgentId = "88888888-8888-4888-8888-888888888888";
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === grantedAgentId) {
+        return makeAgent({
+          id,
+          permissions: { canCreateAgents: false },
+        });
+      }
+      return makeAgent({ id });
+    });
+    mockAccessService.hasPermission.mockImplementation(
+      async (requestedCompanyId: string, principalType: string, principalId: string, permissionKey: string) =>
+        requestedCompanyId === companyId
+        && principalType === "agent"
+        && principalId === grantedAgentId
+        && permissionKey === "agents:create",
+    );
+
+    const app = createApp({
+      type: "agent",
+      agentId: grantedAgentId,
+      companyId,
+      source: "agent_key",
+    });
+
+    const res = await request(app).post(`/api/agents/${agentId}/terminate`);
+
+    expect(res.status).toBe(200);
+    expect(mockAgentService.terminate).toHaveBeenCalledWith(agentId);
+    expect(mockAccessService.hasPermission).toHaveBeenCalledWith(
+      companyId,
+      "agent",
+      grantedAgentId,
+      "agents:create",
+    );
+  });
+
+  it("rejects lifecycle routes for agents without team structure privileges", async () => {
+    const actorAgentId = "99999999-9999-4999-8999-999999999999";
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === actorAgentId) {
+        return makeAgent({
+          id,
+          permissions: { canCreateAgents: false },
+        });
+      }
+      return makeAgent({ id });
+    });
+
+    const app = createApp({
+      type: "agent",
+      agentId: actorAgentId,
+      companyId,
+      source: "agent_key",
+    });
+
+    const res = await request(app).delete(`/api/agents/${agentId}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("team structure management");
+    expect(mockAgentService.remove).not.toHaveBeenCalled();
   });
 });
